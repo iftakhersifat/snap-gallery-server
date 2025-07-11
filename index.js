@@ -160,7 +160,7 @@ app.post('/upload/chunk', chunkUpload.single('chunk'), (req, res) => {
   res.json({ success: true });
 });
 
-const chunkUploadParser = multer().none(); // for parsing FormData with no files
+const chunkUploadParser = multer().none(); // for parsing form-data with no file
 
 app.post('/upload/complete', chunkUploadParser, async (req, res) => {
   const {
@@ -188,13 +188,6 @@ app.post('/upload/complete', chunkUploadParser, async (req, res) => {
 
   const writeStream = fs.createWriteStream(finalPath);
 
-  writeStream.on('error', (err) => {
-    console.error('WriteStream error:', err);
-    if (!res.headersSent) {
-      res.status(500).send('Error writing file');
-    }
-  });
-
   try {
     for (let i = 0; i < Number(totalChunks); i++) {
       const chunkPath = path.join(tmpChunkDir, `${uploadId}-${i}`);
@@ -213,9 +206,8 @@ app.post('/upload/complete', chunkUploadParser, async (req, res) => {
       fs.unlinkSync(chunkPath); // cleanup
     }
 
-    writeStream.end();
-
-    writeStream.on('finish', async () => {
+    // END the stream and wait for it to finish, then insert into DB
+    writeStream.end(async () => {
       try {
         const mediaDoc = {
           title: title || fileName,
@@ -229,14 +221,16 @@ app.post('/upload/complete', chunkUploadParser, async (req, res) => {
         };
 
         const result = await mediaCollection.insertOne(mediaDoc);
+        console.log('✅ File merged and saved:', mediaDoc.url);
+
         res.json({ success: true, mediaId: result.insertedId, media: mediaDoc });
       } catch (dbErr) {
-        console.error('DB insert error:', dbErr);
-        res.status(500).send('Failed to save media metadata');
+        console.error('❌ DB insert error:', dbErr);
+        if (!res.headersSent) res.status(500).send('Failed to save media metadata');
       }
     });
   } catch (err) {
-    console.error('Error merging chunks:', err);
+    console.error('❌ Error merging chunks:', err);
     if (!res.headersSent) {
       res.status(500).send('Failed to merge chunks');
     }
