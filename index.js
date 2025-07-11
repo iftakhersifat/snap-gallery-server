@@ -11,9 +11,10 @@ const port = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors({
-  origin: ["http://localhost:5173"], // তোমার ফ্রন্টেন্ড এর URL
+  origin: ["http://localhost:5173", "https://snaap-gallery.netlify.app"],
   credentials: true
 }));
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
