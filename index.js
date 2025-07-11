@@ -11,22 +11,23 @@ const port = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors({
-  origin: ["http://localhost:5173"],
+  origin: ["http://localhost:5173"], // তোমার ফ্রন্টেন্ড এর URL
   credentials: true
 }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// Ensure uploads base folder exists
+// Base upload directory
 const baseUploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(baseUploadDir)) {
   fs.mkdirSync(baseUploadDir);
   console.log('Uploads base folder created');
 }
-
-// Serve uploaded files statically
 app.use('/uploads', express.static(baseUploadDir));
+
+// Temporary chunk storage folder
+const tmpChunkDir = path.join(__dirname, 'tmp_chunks');
+if (!fs.existsSync(tmpChunkDir)) fs.mkdirSync(tmpChunkDir);
 
 // MongoDB setup
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.mojyanw.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
@@ -46,10 +47,9 @@ async function connectDB() {
   mediaCollection = db.collection('media');
   console.log('Connected to MongoDB');
 }
-
 connectDB().catch(console.error);
 
-// Multer config with dynamic sanitized folder & large file support
+// Multer config for normal uploads (single or multiple)
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     let folder = req.body.folder || 'others';
@@ -68,15 +68,17 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: {
-    fileSize: 20 * 1024 * 1024 * 1024, // 20GB per file
-  },
+  limits: { fileSize: 20 * 1024 * 1024 * 1024 }, // 20GB limit per file
 });
 
-// Routes
+// === ROUTES ===
+
+// Basic server test
 app.get('/', (req, res) => {
   res.send('snap-vault-server is running');
 });
+
+// --------- Normal uploads -----------
 
 // Upload single media
 app.post('/media', upload.single('media'), async (req, res) => {
@@ -136,6 +138,73 @@ app.post('/media/multi', upload.array('media'), async (req, res) => {
   }
 });
 
+// --------- Chunk upload (for large files) -----------
+
+// Multer for chunk uploads
+const chunkStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, tmpChunkDir);
+  },
+  filename: (req, file, cb) => {
+    const { uploadId, chunkIndex } = req.body;
+    cb(null, `${uploadId}-${chunkIndex}`);
+  }
+});
+const chunkUpload = multer({ storage: chunkStorage });
+
+// Upload chunk
+app.post('/upload/chunk', chunkUpload.single('chunk'), (req, res) => {
+  if (!req.file) return res.status(400).send('No chunk uploaded');
+  res.json({ success: true });
+});
+
+// Complete upload & merge chunks
+app.post('/upload/complete', async (req, res) => {
+  const { uploadId, fileName, totalChunks, title, type, isPrivate, folder } = req.body;
+  if (!uploadId || !fileName || !totalChunks) return res.status(400).send('Missing parameters');
+
+  const folderName = (folder || 'others').replace(/[^a-zA-Z0-9-_]/g, '') || 'others';
+  const uploadFolder = path.join(baseUploadDir, folderName);
+  if (!fs.existsSync(uploadFolder)) fs.mkdirSync(uploadFolder, { recursive: true });
+
+  const finalFileName = Date.now() + '-' + Math.round(Math.random() * 1e9) + path.extname(fileName);
+  const finalPath = path.join(uploadFolder, finalFileName);
+
+  const writeStream = fs.createWriteStream(finalPath);
+
+  try {
+    for (let i = 0; i < totalChunks; i++) {
+      const chunkPath = path.join(tmpChunkDir, `${uploadId}-${i}`);
+      if (!fs.existsSync(chunkPath)) {
+        return res.status(400).send(`Chunk ${i} not found`);
+      }
+      const data = fs.readFileSync(chunkPath);
+      writeStream.write(data);
+      fs.unlinkSync(chunkPath); // remove chunk after appending
+    }
+    writeStream.end();
+
+    writeStream.on('finish', async () => {
+      const mediaDoc = {
+        title: title || fileName,
+        type: type || (path.extname(fileName).toLowerCase() === '.mp4' ? 'video' : 'image'),
+        url: `/uploads/${folderName}/${finalFileName}`,
+        isPrivate: isPrivate === 'true' || false,
+        folder: folderName,
+        createdAt: new Date(),
+        downloadCount: 0,
+      };
+      const result = await mediaCollection.insertOne(mediaDoc);
+      res.json({ success: true, mediaId: result.insertedId, media: mediaDoc });
+    });
+  } catch (err) {
+    console.error('Error merging chunks:', err);
+    res.status(500).send('Failed to merge chunks');
+  }
+});
+
+// --------- Media fetch -----------
+
 // Get all public media
 app.get('/media', async (req, res) => {
   try {
@@ -146,7 +215,7 @@ app.get('/media', async (req, res) => {
   }
 });
 
-// Get all uploads (admin view)
+// Get all uploads (admin/all)
 app.get('/my-uploads', async (req, res) => {
   try {
     const mediaList = await mediaCollection.find({}).toArray();
@@ -156,7 +225,8 @@ app.get('/my-uploads', async (req, res) => {
   }
 });
 
-// Delete media
+// --------- Media delete -----------
+
 app.delete('/media/:id', async (req, res) => {
   try {
     const id = req.params.id;
@@ -182,7 +252,8 @@ app.delete('/media/:id', async (req, res) => {
   }
 });
 
-// Update media metadata
+// --------- Media update -----------
+
 app.patch('/media/:id', async (req, res) => {
   try {
     const id = req.params.id;
@@ -207,7 +278,8 @@ app.patch('/media/:id', async (req, res) => {
   }
 });
 
-// Track media download count
+// --------- Download count tracking -----------
+
 app.post('/media/download', async (req, res) => {
   try {
     const { mediaId } = req.body;
@@ -229,7 +301,8 @@ app.post('/media/download', async (req, res) => {
   }
 });
 
-// ✅ Video streaming endpoint (optional)
+// --------- Video streaming with Range requests -----------
+
 app.get('/stream/:folder/:filename', (req, res) => {
   const { folder, filename } = req.params;
   const videoPath = path.join(baseUploadDir, folder, filename);
@@ -252,6 +325,11 @@ app.get('/stream/:folder/:filename', (req, res) => {
     const start = parseInt(parts[0], 10);
     const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
 
+    if (start >= fileSize) {
+      res.status(416).send('Requested range not satisfiable\n' + start + ' >= ' + fileSize);
+      return;
+    }
+
     const chunkSize = end - start + 1;
     const stream = fs.createReadStream(videoPath, { start, end });
 
@@ -266,6 +344,7 @@ app.get('/stream/:folder/:filename', (req, res) => {
   });
 });
 
+// Start server
 app.listen(port, () => {
   console.log(`🚀 Server running on port ${port}`);
 });
