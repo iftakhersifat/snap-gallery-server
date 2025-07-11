@@ -173,38 +173,66 @@ app.post('/upload/complete', async (req, res) => {
 
   const writeStream = fs.createWriteStream(finalPath);
 
+  // Handle stream errors
+  writeStream.on('error', (err) => {
+    console.error('WriteStream error:', err);
+    if (!res.headersSent) {
+      res.status(500).send('Error writing file');
+    }
+  });
+
   try {
+    // Write chunks sequentially and wait for each to finish
     for (let i = 0; i < totalChunks; i++) {
       const chunkPath = path.join(tmpChunkDir, `${uploadId}-${i}`);
       if (!fs.existsSync(chunkPath)) {
         return res.status(400).send(`Chunk ${i} not found`);
       }
-      const data = fs.readFileSync(chunkPath);
-      writeStream.write(data);
-      fs.unlinkSync(chunkPath); // remove chunk after appending
+      const chunkBuffer = fs.readFileSync(chunkPath);
+
+      await new Promise((resolve, reject) => {
+        writeStream.write(chunkBuffer, (err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+
+      // Delete chunk after writing
+      fs.unlinkSync(chunkPath);
     }
+
+    // End the write stream after all chunks are written
     writeStream.end();
 
+    // When finished writing, insert metadata to DB and respond
     writeStream.on('finish', async () => {
-      const mediaDoc = {
-  title: title || fileName,
-  type: type || (path.extname(fileName).toLowerCase() === '.mp4' ? 'video' : 'image'),
-  url: `/uploads/${folderName}/${finalFileName}`,
-  isPrivate: isPrivate === 'true' || false,
-  folder: folderName,
-  category: category || 'Uncategorized',
-  createdAt: new Date(),
-  downloadCount: 0,
-};
+      try {
+        const mediaDoc = {
+          title: title || fileName,
+          type: type || (path.extname(fileName).toLowerCase() === '.mp4' ? 'video' : 'image'),
+          url: `/uploads/${folderName}/${finalFileName}`,
+          isPrivate: isPrivate === 'true' || false,
+          folder: folderName,
+          category: category || 'Uncategorized',
+          createdAt: new Date(),
+          downloadCount: 0,
+        };
 
-      const result = await mediaCollection.insertOne(mediaDoc);
-      res.json({ success: true, mediaId: result.insertedId, media: mediaDoc });
+        const result = await mediaCollection.insertOne(mediaDoc);
+        res.json({ success: true, mediaId: result.insertedId, media: mediaDoc });
+      } catch (dbErr) {
+        console.error('DB insert error:', dbErr);
+        res.status(500).send('Failed to save media metadata');
+      }
     });
   } catch (err) {
     console.error('Error merging chunks:', err);
-    res.status(500).send('Failed to merge chunks');
+    if (!res.headersSent) {
+      res.status(500).send('Failed to merge chunks');
+    }
   }
 });
+
 
 // --------- Media fetch -----------
 
