@@ -161,7 +161,7 @@ app.post('/upload/chunk', chunkUpload.single('chunk'), (req, res) => {
 
 // Complete upload & merge chunks
 app.post('/upload/complete', async (req, res) => {
-  const { uploadId, fileName, totalChunks, title, type, isPrivate, folder } = req.body;
+  const { uploadId, fileName, totalChunks, title, type, isPrivate, folder, category } = req.body;
   if (!uploadId || !fileName || !totalChunks) return res.status(400).send('Missing parameters');
 
   const folderName = (folder || 'others').replace(/[^a-zA-Z0-9-_]/g, '') || 'others';
@@ -187,14 +187,16 @@ app.post('/upload/complete', async (req, res) => {
 
     writeStream.on('finish', async () => {
       const mediaDoc = {
-        title: title || fileName,
-        type: type || (path.extname(fileName).toLowerCase() === '.mp4' ? 'video' : 'image'),
-        url: `/uploads/${folderName}/${finalFileName}`,
-        isPrivate: isPrivate === 'true' || false,
-        folder: folderName,
-        createdAt: new Date(),
-        downloadCount: 0,
-      };
+  title: title || fileName,
+  type: type || (path.extname(fileName).toLowerCase() === '.mp4' ? 'video' : 'image'),
+  url: `/uploads/${folderName}/${finalFileName}`,
+  isPrivate: isPrivate === 'true' || false,
+  folder: folderName,
+  category: category || 'Uncategorized',
+  createdAt: new Date(),
+  downloadCount: 0,
+};
+
       const result = await mediaCollection.insertOne(mediaDoc);
       res.json({ success: true, mediaId: result.insertedId, media: mediaDoc });
     });
