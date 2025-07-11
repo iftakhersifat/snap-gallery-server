@@ -15,8 +15,9 @@ app.use(cors({
   credentials: true
 }));
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '500mb' }));
+app.use(express.json({ limit: '500mb' }));
+
 
 // Base upload directory
 const baseUploadDir = path.join(__dirname, 'uploads');
@@ -159,21 +160,34 @@ app.post('/upload/chunk', chunkUpload.single('chunk'), (req, res) => {
   res.json({ success: true });
 });
 
-// Complete upload & merge chunks
-app.post('/upload/complete', async (req, res) => {
-  const { uploadId, fileName, totalChunks, title, type, isPrivate, folder, category } = req.body;
-  if (!uploadId || !fileName || !totalChunks) return res.status(400).send('Missing parameters');
+const chunkUploadParser = multer().none(); // for parsing FormData with no files
+
+app.post('/upload/complete', chunkUploadParser, async (req, res) => {
+  const {
+    uploadId,
+    fileName,
+    totalChunks,
+    title,
+    type,
+    isPrivate,
+    folder,
+    category
+  } = req.body;
+
+  if (!uploadId || !fileName || !totalChunks) {
+    return res.status(400).send('Missing parameters');
+  }
 
   const folderName = (folder || 'others').replace(/[^a-zA-Z0-9-_]/g, '') || 'others';
   const uploadFolder = path.join(baseUploadDir, folderName);
   if (!fs.existsSync(uploadFolder)) fs.mkdirSync(uploadFolder, { recursive: true });
 
-  const finalFileName = Date.now() + '-' + Math.round(Math.random() * 1e9) + path.extname(fileName);
+  const finalFileName =
+    Date.now() + '-' + Math.round(Math.random() * 1e9) + path.extname(fileName);
   const finalPath = path.join(uploadFolder, finalFileName);
 
   const writeStream = fs.createWriteStream(finalPath);
 
-  // Handle stream errors
   writeStream.on('error', (err) => {
     console.error('WriteStream error:', err);
     if (!res.headersSent) {
@@ -182,8 +196,7 @@ app.post('/upload/complete', async (req, res) => {
   });
 
   try {
-    // Write chunks sequentially and wait for each to finish
-    for (let i = 0; i < totalChunks; i++) {
+    for (let i = 0; i < Number(totalChunks); i++) {
       const chunkPath = path.join(tmpChunkDir, `${uploadId}-${i}`);
       if (!fs.existsSync(chunkPath)) {
         return res.status(400).send(`Chunk ${i} not found`);
@@ -197,14 +210,11 @@ app.post('/upload/complete', async (req, res) => {
         });
       });
 
-      // Delete chunk after writing
-      fs.unlinkSync(chunkPath);
+      fs.unlinkSync(chunkPath); // cleanup
     }
 
-    // End the write stream after all chunks are written
     writeStream.end();
 
-    // When finished writing, insert metadata to DB and respond
     writeStream.on('finish', async () => {
       try {
         const mediaDoc = {
@@ -232,6 +242,7 @@ app.post('/upload/complete', async (req, res) => {
     }
   }
 });
+
 
 
 // --------- Media fetch -----------
