@@ -189,25 +189,34 @@ app.post('/upload/complete', chunkUploadParser, async (req, res) => {
   const writeStream = fs.createWriteStream(finalPath);
 
   try {
+    // Check all chunks exist before merging
     for (let i = 0; i < Number(totalChunks); i++) {
       const chunkPath = path.join(tmpChunkDir, `${uploadId}-${i}`);
       if (!fs.existsSync(chunkPath)) {
+        console.error(`Chunk ${i} missing! Path: ${chunkPath}`);
         return res.status(400).send(`Chunk ${i} not found`);
       }
-      const chunkBuffer = fs.readFileSync(chunkPath);
+    }
 
+    // Merge chunks sequentially
+    for (let i = 0; i < Number(totalChunks); i++) {
+      const chunkPath = path.join(tmpChunkDir, `${uploadId}-${i}`);
+      const chunkBuffer = fs.readFileSync(chunkPath);
       await new Promise((resolve, reject) => {
         writeStream.write(chunkBuffer, (err) => {
           if (err) reject(err);
           else resolve();
         });
       });
-
-      fs.unlinkSync(chunkPath); // cleanup
+      // Delete chunk after writing
+      fs.unlinkSync(chunkPath);
     }
 
-    // END the stream and wait for it to finish, then insert into DB
-    writeStream.end(async () => {
+    // End write stream to flush everything
+    writeStream.end();
+
+    // Wait for stream to finish before inserting to DB
+    writeStream.on('finish', async () => {
       try {
         const mediaDoc = {
           title: title || fileName,
@@ -229,6 +238,7 @@ app.post('/upload/complete', chunkUploadParser, async (req, res) => {
         if (!res.headersSent) res.status(500).send('Failed to save media metadata');
       }
     });
+
   } catch (err) {
     console.error('❌ Error merging chunks:', err);
     if (!res.headersSent) {
@@ -236,6 +246,7 @@ app.post('/upload/complete', chunkUploadParser, async (req, res) => {
     }
   }
 });
+
 
 
 
