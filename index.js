@@ -18,7 +18,6 @@ app.use(cors({
 app.use(express.urlencoded({ extended: true, limit: '500mb' }));
 app.use(express.json({ limit: '500mb' }));
 
-
 // Base upload directory
 const baseUploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(baseUploadDir)) {
@@ -160,9 +159,12 @@ app.post('/upload/chunk', chunkUpload.single('chunk'), (req, res) => {
   res.json({ success: true });
 });
 
-const chunkUploadParser = multer().none(); // for parsing form-data with no file
+// Use a single multer instance for parsing form-data without files
+const uploadNone = multer();
 
-app.post('/upload/complete', chunkUploadParser, async (req, res) => {
+app.post('/upload/complete', uploadNone.none(), async (req, res) => {
+  console.log('Received /upload/complete body:', req.body);
+
   const {
     uploadId,
     fileName,
@@ -175,6 +177,7 @@ app.post('/upload/complete', chunkUploadParser, async (req, res) => {
   } = req.body;
 
   if (!uploadId || !fileName || !totalChunks) {
+    console.log('Missing required parameters in /upload/complete:', req.body);
     return res.status(400).send('Missing parameters');
   }
 
@@ -189,34 +192,25 @@ app.post('/upload/complete', chunkUploadParser, async (req, res) => {
   const writeStream = fs.createWriteStream(finalPath);
 
   try {
-    // Check all chunks exist before merging
     for (let i = 0; i < Number(totalChunks); i++) {
       const chunkPath = path.join(tmpChunkDir, `${uploadId}-${i}`);
       if (!fs.existsSync(chunkPath)) {
-        console.error(`Chunk ${i} missing! Path: ${chunkPath}`);
         return res.status(400).send(`Chunk ${i} not found`);
       }
-    }
-
-    // Merge chunks sequentially
-    for (let i = 0; i < Number(totalChunks); i++) {
-      const chunkPath = path.join(tmpChunkDir, `${uploadId}-${i}`);
       const chunkBuffer = fs.readFileSync(chunkPath);
+
       await new Promise((resolve, reject) => {
         writeStream.write(chunkBuffer, (err) => {
           if (err) reject(err);
           else resolve();
         });
       });
-      // Delete chunk after writing
-      fs.unlinkSync(chunkPath);
+
+      fs.unlinkSync(chunkPath); // cleanup
     }
 
-    // End write stream to flush everything
-    writeStream.end();
-
-    // Wait for stream to finish before inserting to DB
-    writeStream.on('finish', async () => {
+    // END the stream and wait for it to finish, then insert into DB
+    writeStream.end(async () => {
       try {
         const mediaDoc = {
           title: title || fileName,
@@ -238,7 +232,6 @@ app.post('/upload/complete', chunkUploadParser, async (req, res) => {
         if (!res.headersSent) res.status(500).send('Failed to save media metadata');
       }
     });
-
   } catch (err) {
     console.error('❌ Error merging chunks:', err);
     if (!res.headersSent) {
@@ -247,12 +240,8 @@ app.post('/upload/complete', chunkUploadParser, async (req, res) => {
   }
 });
 
-
-
-
 // --------- Media fetch -----------
 
-// Get all public media
 app.get('/media', async (req, res) => {
   try {
     const mediaList = await mediaCollection.find({ isPrivate: false }).toArray();
@@ -262,7 +251,6 @@ app.get('/media', async (req, res) => {
   }
 });
 
-// Get all uploads (admin/all)
 app.get('/my-uploads', async (req, res) => {
   try {
     const mediaList = await mediaCollection.find({}).toArray();
