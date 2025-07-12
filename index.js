@@ -1,3 +1,5 @@
+// snap-gallery-server: Full working backend with chunk upload, streaming, and media metadata
+
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -14,34 +16,22 @@ app.use(cors({
   origin: ["http://localhost:5173", "https://snaap-gallery.netlify.app"],
   credentials: true
 }));
-
 app.use(express.urlencoded({ extended: true, limit: '500mb' }));
 app.use(express.json({ limit: '500mb' }));
 
 // Base upload directory
 const baseUploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(baseUploadDir)) {
-  fs.mkdirSync(baseUploadDir);
-  console.log('Uploads base folder created');
-}
+if (!fs.existsSync(baseUploadDir)) fs.mkdirSync(baseUploadDir);
 app.use('/uploads', express.static(baseUploadDir));
 
-// Temporary chunk storage folder
+// Chunk temp folder
 const tmpChunkDir = path.join(__dirname, 'tmp_chunks');
 if (!fs.existsSync(tmpChunkDir)) fs.mkdirSync(tmpChunkDir);
 
 // MongoDB setup
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.mojyanw.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
-const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
-});
-
+const client = new MongoClient(uri, { serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true } });
 let mediaCollection;
-
 async function connectDB() {
   await client.connect();
   const db = client.db('snapVaultDB');
@@ -50,45 +40,29 @@ async function connectDB() {
 }
 connectDB().catch(console.error);
 
-// Multer config for normal uploads (single or multiple)
+// Multer setup for standard uploads
 const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
+  destination: (req, file, cb) => {
     let folder = req.body.folder || 'others';
     folder = folder.replace(/[^a-zA-Z0-9-_]/g, '') || 'others';
     const uploadPath = path.join(baseUploadDir, folder);
-    fs.mkdir(uploadPath, { recursive: true }, (err) => {
-      if (err) return cb(err);
-      cb(null, uploadPath);
-    });
+    fs.mkdir(uploadPath, { recursive: true }, err => cb(err, uploadPath));
   },
-  filename: function (req, file, cb) {
+  filename: (req, file, cb) => {
     const uniqueName = Date.now() + '-' + Math.round(Math.random() * 1e9);
     cb(null, uniqueName + path.extname(file.originalname));
   },
 });
+const upload = multer({ storage, limits: { fileSize: 20 * 1024 * 1024 * 1024 } });
 
-const upload = multer({
-  storage,
-  limits: { fileSize: 20 * 1024 * 1024 * 1024 }, // 20GB limit per file
-});
+// Routes
+app.get('/', (req, res) => res.send('snap-vault-server is running'));
 
-// === ROUTES ===
-
-// Basic server test
-app.get('/', (req, res) => {
-  res.send('snap-vault-server is running');
-});
-
-// --------- Normal uploads -----------
-
-// Upload single media
 app.post('/media', upload.single('media'), async (req, res) => {
   try {
     const { title, type, isPrivate, folder, uploaderName } = req.body;
     if (!req.file) return res.status(400).send('No file uploaded');
-
     const folderName = (folder || 'others').replace(/[^a-zA-Z0-9-_]/g, '') || 'others';
-
     const mediaDoc = {
       title: title || req.file.originalname,
       type,
@@ -99,7 +73,6 @@ app.post('/media', upload.single('media'), async (req, res) => {
       uploaderName: uploaderName || 'Unknown',
       downloadCount: 0,
     };
-
     const result = await mediaCollection.insertOne(mediaDoc);
     res.json({ success: true, mediaId: result.insertedId, media: mediaDoc });
   } catch (err) {
@@ -108,17 +81,12 @@ app.post('/media', upload.single('media'), async (req, res) => {
   }
 });
 
-// Upload multiple media
 app.post('/media/multi', upload.array('media'), async (req, res) => {
   try {
     const { title, isPrivate, folder, uploaderName, category } = req.body;
-    const categoryName = (category?.trim() || 'Uncategorized');
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).send('No files uploaded');
-    }
-
     const folderName = (folder || 'others').replace(/[^a-zA-Z0-9-_]/g, '') || 'others';
-
+    const categoryName = category?.trim() || 'Uncategorized';
+    if (!req.files || req.files.length === 0) return res.status(400).send('No files uploaded');
     const mediaDocs = req.files.map(file => ({
       title: title || file.originalname,
       type: file.mimetype.startsWith('video') ? 'video' : 'image',
@@ -130,117 +98,68 @@ app.post('/media/multi', upload.array('media'), async (req, res) => {
       uploaderName: uploaderName || 'Unknown',
       downloadCount: 0,
     }));
-
     const result = await mediaCollection.insertMany(mediaDocs);
     res.json({ success: true, count: result.insertedCount, media: mediaDocs });
-  } catch (error) {
-    console.error(error);
+  } catch (err) {
+    console.error(err);
     res.status(500).send('Failed to upload files');
   }
 });
 
-// --------- Chunk upload (for large files) -----------
-
-// Multer for chunk uploads
+// Chunk upload setup
 const chunkStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, tmpChunkDir);
-  },
-  filename: (req, file, cb) => {
-    const { uploadId, chunkIndex } = req.body;
-    cb(null, `${uploadId}-${chunkIndex}`);
-  }
+  destination: (req, file, cb) => cb(null, tmpChunkDir),
+  filename: (req, file, cb) => cb(null, `${req.body.uploadId}-${req.body.chunkIndex}`),
 });
 const chunkUpload = multer({ storage: chunkStorage });
-
-// Upload chunk
 app.post('/upload/chunk', chunkUpload.single('chunk'), (req, res) => {
+  console.log(`✅ Received chunk ${req.body.chunkIndex} for ${req.body.uploadId}`);
   if (!req.file) return res.status(400).send('No chunk uploaded');
   res.json({ success: true });
 });
 
-// Use a single multer instance for parsing form-data without files
 const uploadNone = multer();
-
 app.post('/upload/complete', uploadNone.none(), async (req, res) => {
-  console.log('Received /upload/complete body:', req.body);
-
-  const {
-    uploadId,
-    fileName,
-    totalChunks,
-    title,
-    type,
-    isPrivate,
-    folder,
-    category
-  } = req.body;
-
-  if (!uploadId || !fileName || !totalChunks) {
-    console.log('Missing required parameters in /upload/complete:', req.body);
-    return res.status(400).send('Missing parameters');
-  }
-
+  const { uploadId, fileName, totalChunks, title, type, isPrivate, folder, category } = req.body;
+  if (!uploadId || !fileName || !totalChunks) return res.status(400).send('Missing parameters');
   const folderName = (folder || 'others').replace(/[^a-zA-Z0-9-_]/g, '') || 'others';
   const uploadFolder = path.join(baseUploadDir, folderName);
   if (!fs.existsSync(uploadFolder)) fs.mkdirSync(uploadFolder, { recursive: true });
 
-  const finalFileName =
-    Date.now() + '-' + Math.round(Math.random() * 1e9) + path.extname(fileName);
+  const finalFileName = Date.now() + '-' + Math.round(Math.random() * 1e9) + path.extname(fileName);
   const finalPath = path.join(uploadFolder, finalFileName);
-
   const writeStream = fs.createWriteStream(finalPath);
 
   try {
     for (let i = 0; i < Number(totalChunks); i++) {
       const chunkPath = path.join(tmpChunkDir, `${uploadId}-${i}`);
-      if (!fs.existsSync(chunkPath)) {
-        return res.status(400).send(`Chunk ${i} not found`);
-      }
+      if (!fs.existsSync(chunkPath)) return res.status(400).send(`Chunk ${i} not found`);
       const chunkBuffer = fs.readFileSync(chunkPath);
-
       await new Promise((resolve, reject) => {
-        writeStream.write(chunkBuffer, (err) => {
-          if (err) reject(err);
-          else resolve();
-        });
+        writeStream.write(chunkBuffer, err => err ? reject(err) : resolve());
       });
-
-      fs.unlinkSync(chunkPath); // cleanup
+      fs.unlinkSync(chunkPath);
     }
-
-    // END the stream and wait for it to finish, then insert into DB
     writeStream.end(async () => {
-      try {
-        const mediaDoc = {
-          title: title || fileName,
-          type: type || (path.extname(fileName).toLowerCase() === '.mp4' ? 'video' : 'image'),
-          url: `/uploads/${folderName}/${finalFileName}`,
-          isPrivate: isPrivate === 'true' || false,
-          folder: folderName,
-          category: category || 'Uncategorized',
-          createdAt: new Date(),
-          downloadCount: 0,
-        };
-
-        const result = await mediaCollection.insertOne(mediaDoc);
-        console.log('✅ File merged and saved:', mediaDoc.url);
-
-        res.json({ success: true, mediaId: result.insertedId, media: mediaDoc });
-      } catch (dbErr) {
-        console.error('❌ DB insert error:', dbErr);
-        if (!res.headersSent) res.status(500).send('Failed to save media metadata');
-      }
+      const mediaDoc = {
+        title: title || fileName,
+        type: type || (path.extname(fileName).toLowerCase() === '.mp4' ? 'video' : 'image'),
+        url: `/uploads/${folderName}/${finalFileName}`,
+        isPrivate: isPrivate === 'true',
+        folder: folderName,
+        category: category || 'Uncategorized',
+        createdAt: new Date(),
+        downloadCount: 0,
+      };
+      const result = await mediaCollection.insertOne(mediaDoc);
+      console.log('✅ File merged and saved:', mediaDoc.url);
+      res.json({ success: true, mediaId: result.insertedId, media: mediaDoc });
     });
   } catch (err) {
-    console.error('❌ Error merging chunks:', err);
-    if (!res.headersSent) {
-      res.status(500).send('Failed to merge chunks');
-    }
+    console.error('❌ Merge failed:', err);
+    if (!res.headersSent) res.status(500).send('Merge failed');
   }
 });
-
-// --------- Media fetch -----------
 
 app.get('/media', async (req, res) => {
   try {
@@ -260,126 +179,82 @@ app.get('/my-uploads', async (req, res) => {
   }
 });
 
-// --------- Media delete -----------
-
 app.delete('/media/:id', async (req, res) => {
   try {
     const id = req.params.id;
     const media = await mediaCollection.findOne({ _id: new ObjectId(id) });
     if (!media) return res.status(404).send('Media not found');
-
     const relativeFilePath = media.url.replace(/^\/uploads\//, '');
     const filePath = path.join(baseUploadDir, relativeFilePath);
-
-    if (fs.existsSync(filePath)) {
-      fs.unlink(filePath, (err) => {
-        if (err) console.warn('File deletion error:', err);
-      });
-    } else {
-      console.warn('File not found for deletion:', filePath);
-    }
-
+    if (fs.existsSync(filePath)) fs.unlink(filePath, err => err && console.warn(err));
     await mediaCollection.deleteOne({ _id: new ObjectId(id) });
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
     res.status(500).send('Failed to delete media');
   }
 });
 
-// --------- Media update -----------
-
 app.patch('/media/:id', async (req, res) => {
   try {
     const id = req.params.id;
-    const updateData = req.body;
     const allowedUpdates = ['title', 'type', 'isPrivate'];
     const updateObj = {};
-
-    allowedUpdates.forEach(field => {
-      if (field in updateData) updateObj[field] = updateData[field];
-    });
-
+    for (const key of allowedUpdates) {
+      if (key in req.body) updateObj[key] = req.body[key];
+    }
     const result = await mediaCollection.updateOne(
       { _id: new ObjectId(id) },
       { $set: updateObj }
     );
-
     if (result.matchedCount === 0) return res.status(404).send('Media not found');
     res.json({ success: true });
   } catch (err) {
-    console.error(err);
     res.status(500).send('Failed to update media');
   }
 });
-
-// --------- Download count tracking -----------
 
 app.post('/media/download', async (req, res) => {
   try {
     const { mediaId } = req.body;
     if (!mediaId) return res.status(400).send('mediaId is required');
-
     const media = await mediaCollection.findOne({ _id: new ObjectId(mediaId) });
     if (!media) return res.status(404).send('Media not found');
-
     const newCount = (media.downloadCount || 0) + 1;
     await mediaCollection.updateOne(
       { _id: new ObjectId(mediaId) },
       { $set: { downloadCount: newCount } }
     );
-
     res.json({ success: true, downloadCount: newCount });
   } catch (err) {
-    console.error('Download tracking error:', err);
     res.status(500).send('Failed to track download');
   }
 });
 
-// --------- Video streaming with Range requests -----------
-
 app.get('/stream/:folder/:filename', (req, res) => {
   const { folder, filename } = req.params;
   const videoPath = path.join(baseUploadDir, folder, filename);
-
   fs.stat(videoPath, (err, stats) => {
     if (err || !stats) return res.status(404).send('Video not found');
-
     const fileSize = stats.size;
     const range = req.headers.range;
-
     if (!range) {
-      res.writeHead(200, {
-        'Content-Length': fileSize,
-        'Content-Type': 'video/mp4',
-      });
+      res.writeHead(200, { 'Content-Length': fileSize, 'Content-Type': 'video/mp4' });
       return fs.createReadStream(videoPath).pipe(res);
     }
-
-    const parts = range.replace(/bytes=/, '').split('-');
-    const start = parseInt(parts[0], 10);
-    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-
-    if (start >= fileSize) {
-      res.status(416).send('Requested range not satisfiable\n' + start + ' >= ' + fileSize);
-      return;
-    }
-
+    const [startStr, endStr] = range.replace(/bytes=/, '').split('-');
+    const start = parseInt(startStr, 10);
+    const end = endStr ? parseInt(endStr, 10) : fileSize - 1;
+    if (start >= fileSize) return res.status(416).send('Requested range not satisfiable');
     const chunkSize = end - start + 1;
     const stream = fs.createReadStream(videoPath, { start, end });
-
     res.writeHead(206, {
       'Content-Range': `bytes ${start}-${end}/${fileSize}`,
       'Accept-Ranges': 'bytes',
       'Content-Length': chunkSize,
       'Content-Type': 'video/mp4',
     });
-
     stream.pipe(res);
   });
 });
 
-// Start server
-app.listen(port, () => {
-  console.log(`🚀 Server running on port ${port}`);
-});
+app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
