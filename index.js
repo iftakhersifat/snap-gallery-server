@@ -121,13 +121,18 @@ const chunkStorage = multer.diskStorage({
 });
 const chunkUpload = multer({ 
   storage: chunkStorage,
-  limits: { fileSize: 100 * 1024 * 1024 } // 100MB chunk size
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB chunk limit
 });
+
 app.post('/upload/chunk', chunkUpload.single('chunk'), (req, res) => {
+  if (!req.file) {
+    console.error('❌ No chunk received', req.body);
+    return res.status(400).send('No chunk uploaded');
+  }
   console.log(`✅ Received chunk ${req.body.chunkIndex} for ${req.body.uploadId}`);
-  if (!req.file) return res.status(400).send('No chunk uploaded');
   res.json({ success: true });
 });
+
 
 const uploadNone = multer();
 app.post('/upload/complete', uploadNone.none(), async (req, res) => {
@@ -144,13 +149,17 @@ app.post('/upload/complete', uploadNone.none(), async (req, res) => {
   try {
     for (let i = 0; i < Number(totalChunks); i++) {
       const chunkPath = path.join(tmpChunkDir, `${uploadId}-${i}`);
-      if (!fs.existsSync(chunkPath)) return res.status(400).send(`Chunk ${i} not found`);
+      if (!fs.existsSync(chunkPath)) {
+        console.error(`❌ Missing chunk ${i}: ${chunkPath}`);
+        return res.status(400).send(`Chunk ${i} not found`);
+      }
       const chunkBuffer = fs.readFileSync(chunkPath);
       await new Promise((resolve, reject) => {
         writeStream.write(chunkBuffer, err => err ? reject(err) : resolve());
       });
-      fs.unlinkSync(chunkPath);
+      fs.unlinkSync(chunkPath); // Delete chunk after appending
     }
+
     writeStream.end(async () => {
       const mediaDoc = {
         title: title || fileName,
@@ -166,6 +175,7 @@ app.post('/upload/complete', uploadNone.none(), async (req, res) => {
       console.log('✅ File merged and saved:', mediaDoc.url);
       res.json({ success: true, mediaId: result.insertedId, media: mediaDoc });
     });
+
   } catch (err) {
     console.error('❌ Merge failed:', err);
     if (!res.headersSent) res.status(500).send('Merge failed');
