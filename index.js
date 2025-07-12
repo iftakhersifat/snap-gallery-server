@@ -1,5 +1,3 @@
-// snap-gallery-server: Full working backend with chunk upload, streaming, and media metadata
-
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -16,8 +14,16 @@ app.use(cors({
   origin: ["http://localhost:5173", "https://snaap-gallery.netlify.app"],
   credentials: true
 }));
-app.use(express.urlencoded({ extended: true, limit: '500mb' }));
-app.use(express.json({ limit: '500mb' }));
+
+// Increase body parser limit
+app.use(express.urlencoded({ extended: true, limit: '2gb' }));
+app.use(express.json({ limit: '2gb' }));
+
+// Disable server timeout for big uploads
+app.use((req, res, next) => {
+  req.setTimeout(0); // disable timeout for long uploads
+  next();
+});
 
 // Base upload directory
 const baseUploadDir = path.join(__dirname, 'uploads');
@@ -30,13 +36,15 @@ if (!fs.existsSync(tmpChunkDir)) fs.mkdirSync(tmpChunkDir);
 
 // MongoDB setup
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.mojyanw.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
-const client = new MongoClient(uri, { serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true } });
+const client = new MongoClient(uri, {
+  serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true }
+});
 let mediaCollection;
 async function connectDB() {
   await client.connect();
   const db = client.db('snapVaultDB');
   mediaCollection = db.collection('media');
-  console.log('Connected to MongoDB');
+  console.log('✅ Connected to MongoDB');
 }
 connectDB().catch(console.error);
 
@@ -53,7 +61,7 @@ const storage = multer.diskStorage({
     cb(null, uniqueName + path.extname(file.originalname));
   },
 });
-const upload = multer({ storage, limits: { fileSize: 20 * 1024 * 1024 * 1024 } });
+const upload = multer({ storage, limits: { fileSize: 20 * 1024 * 1024 * 1024 } }); // 20GB
 
 // Routes
 app.get('/', (req, res) => res.send('snap-vault-server is running'));
@@ -111,7 +119,10 @@ const chunkStorage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, tmpChunkDir),
   filename: (req, file, cb) => cb(null, `${req.body.uploadId}-${req.body.chunkIndex}`),
 });
-const chunkUpload = multer({ storage: chunkStorage });
+const chunkUpload = multer({ 
+  storage: chunkStorage,
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB chunk size
+});
 app.post('/upload/chunk', chunkUpload.single('chunk'), (req, res) => {
   console.log(`✅ Received chunk ${req.body.chunkIndex} for ${req.body.uploadId}`);
   if (!req.file) return res.status(400).send('No chunk uploaded');
@@ -161,6 +172,7 @@ app.post('/upload/complete', uploadNone.none(), async (req, res) => {
   }
 });
 
+// Media routes
 app.get('/media', async (req, res) => {
   try {
     const mediaList = await mediaCollection.find({ isPrivate: false }).toArray();
@@ -230,6 +242,7 @@ app.post('/media/download', async (req, res) => {
   }
 });
 
+// Video Streaming
 app.get('/stream/:folder/:filename', (req, res) => {
   const { folder, filename } = req.params;
   const videoPath = path.join(baseUploadDir, folder, filename);
